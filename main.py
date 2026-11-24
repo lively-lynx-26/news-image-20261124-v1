@@ -1,8 +1,17 @@
-"""Entry program for make.fun news-image-20261124.
+#!/usr/bin/env python3
+"""Copy the finished front page into the harness output directory.
 
-Copies the pre-rendered front-page image (entry.png, 1024x1024) into the
-output directory named by MAKEFUN_OUTPUT_DIR, verifying the copy byte for
-byte against the pinned SHA-256. Standard library only, no network.
+Entry program for the make.fun news-image-20261124 bounty. The image
+itself (entry.png, 1024x1024) is a newspaper front page summing up
+Tuesday 24 November 2026 in 35 dated stories across 7 regions. This
+program only places a byte-exact copy of that image where the harness
+expects the entry output, then proves the copy is identical. Both
+the SHA-256 digest and the file size are checked, so a truncated
+or corrupted copy can never pass as the finished entry.
+
+Output directory: MAKEFUN_OUTPUT_DIR when it names a writable
+directory; otherwise a folder named "output" next to this file. The
+output directory is never deleted and never hard-coded to /output.
 """
 
 import hashlib
@@ -11,57 +20,84 @@ import shutil
 import sys
 from pathlib import Path
 
-EXPECTED_SHA256 = "6fd1a3ac4a6134a368a679e787144849421d1b58654935d2f1568e15f4920aee"
-SOURCE_NAME = "entry.png"
+HERE = Path(__file__).resolve().parent
+SOURCE = HERE / "entry.png"
+EXPECTED_SHA256 = "64561de926496120a2b22d0f5527975161a6712161f4adff7f293cbce41f63cc"
+EXPECTED_SIZE = 176114  # bytes; the front page must be at most 1 MiB
 
 
-def resolve_output_dir() -> Path:
-    """Pick the output directory: MAKEFUN_OUTPUT_DIR if set and writable,
-    otherwise <repo>/output. Never hard-codes /output and never deletes it."""
-    requested = os.environ.get("MAKEFUN_OUTPUT_DIR", "").strip()
-    if requested:
-        candidate = Path(requested)
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            probe = candidate / ".makefun_write_probe"
-            probe.write_bytes(b"ok")
-            probe.unlink()
+def _is_writable(directory):
+    """Return True when we can create and remove a file in directory."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    probe = directory / ".makefun-write-probe"
+    try:
+        probe.write_bytes(b"probe")
+        probe.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def resolve_output_dir():
+    """Pick the output directory, probing writability before trusting it."""
+    wanted = os.environ.get("MAKEFUN_OUTPUT_DIR", "").strip()
+    if wanted:
+        candidate = Path(wanted).expanduser()
+        if _is_writable(candidate):
             return candidate
-        except OSError:
-            pass
-    fallback = Path(__file__).resolve().parent / "output"
-    fallback.mkdir(parents=True, exist_ok=True)
+        print(
+            "MAKEFUN_OUTPUT_DIR {!r} is not writable; falling back "
+            "to the repository output folder.".format(wanted),
+            file=sys.stderr,
+        )
+    fallback = HERE / "output"
+    if not _is_writable(fallback):
+        raise RuntimeError("no writable output directory available")
     return fallback
 
 
-def sha256_of(path: Path) -> str:
+def sha256_of(path):
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def main() -> int:
-    here = Path(__file__).resolve().parent
-    source = here / SOURCE_NAME
-    if not source.is_file():
-        print(f"missing source image: {source}", file=sys.stderr)
+def main():
+    if not SOURCE.is_file():
+        print("missing source image: {}".format(SOURCE), file=sys.stderr)
         return 1
-    if sha256_of(source) != EXPECTED_SHA256:
-        print("source image hash mismatch; refusing to copy", file=sys.stderr)
+    output_dir = resolve_output_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir / "entry.png"
+    shutil.copyfile(SOURCE, destination)
+    actual_size = destination.stat().st_size
+    if actual_size != EXPECTED_SIZE:
+        destination.unlink(missing_ok=True)
+        print(
+            "output has the wrong size (got {} bytes, want {}); "
+            "refusing to finish.".format(actual_size, EXPECTED_SIZE),
+            file=sys.stderr,
+        )
         return 1
-    out_dir = resolve_output_dir()
-    target = out_dir / SOURCE_NAME
-    shutil.copyfile(source, target)
-    # The copy must be byte-identical to the pinned source; a partial or
-    # altered copy is a failure, not a best-effort result.
-    if sha256_of(target) != EXPECTED_SHA256:
-        print("copied image hash mismatch", file=sys.stderr)
+    actual = sha256_of(destination)
+    if actual != EXPECTED_SHA256:
+        destination.unlink(missing_ok=True)
+        print(
+            "output does not match the expected image "
+            "(got {}, want {}); refusing to finish.".format(
+                actual, EXPECTED_SHA256
+            ),
+            file=sys.stderr,
+        )
         return 1
-    print(f"wrote {target} ({EXPECTED_SHA256[:12]}...)")
+    print("wrote {} (sha256 {})".format(destination, actual))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
